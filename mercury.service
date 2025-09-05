@@ -1,0 +1,46 @@
+[Unit]
+Description=Mercury Secure Storage Server for Hecate
+After=network.target
+Documentation=https://github.com/yourusername/hecate
+
+[Service]
+Type=simple
+User=mercury
+Group=mercury
+WorkingDirectory=/var/lib/mercury
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mercury/storage
+ReadOnlyPaths=/etc/mercury
+
+# Environment
+Environment="MERCURY_AUTH_KEY=change-this-in-production"
+EnvironmentFile=-/etc/mercury/mercury.env
+
+# Service
+ExecStart=/usr/local/bin/mercury \
+    --store /var/lib/mercury/storage \
+    --port 10112 \
+    --tls-cert /etc/mercury/cert.pem \
+    --tls-key /etc/mercury/key.pem \
+    --auth-config /etc/mercury/auth.json \
+    --verbose
+
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=512
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mercury
+
+[Install]
+WantedBy=multi-user.target

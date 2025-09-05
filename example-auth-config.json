@@ -1,0 +1,35 @@
+[
+  {
+    "client_id": "alice",
+    "key_hash": "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
+    "permissions": {
+      "can_upload": true,
+      "can_download": true,
+      "can_list": true,
+      "max_file_size": 10737418240,
+      "max_total_storage": 107374182400
+    }
+  },
+  {
+    "client_id": "bob",
+    "key_hash": "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
+    "permissions": {
+      "can_upload": true,
+      "can_download": true,
+      "can_list": false,
+      "max_file_size": 1073741824,
+      "max_total_storage": 10737418240
+    }
+  },
+  {
+    "client_id": "viewer",
+    "key_hash": "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
+    "permissions": {
+      "can_upload": false,
+      "can_download": true,
+      "can_list": true,
+      "max_file_size": null,
+      "max_total_storage": null
+    }
+  }
+]

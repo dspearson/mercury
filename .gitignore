@@ -1,0 +1,22 @@
+# Local configuration
+mercury.toml
+.envrc
+
+# Build artifacts
+/target
+Cargo.lock
+
+# Storage files
+*.hecate
+*.log
+/storage
+
+# Test directories
+/test-*
+test-store/
+.cookie-storage/
+
+# Certificates (for development)
+*.pem
+*.crt
+*.key
