@@ -243,6 +243,7 @@ struct UploadState {
     expected_size: u64,
     received_size: u64,
     writer: Option<tokio::fs::File>,
+    is_complete: bool,
 }
 
 impl ConnectionHandler {
@@ -270,16 +271,7 @@ impl ConnectionHandler {
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-        // Send auth requirement if needed
-        if self.auth_key.is_some() && !self.authenticated {
-            let msg = ServerMessage::AuthResult {
-                success: false,
-                message: Some("Authentication required".to_string()),
-            };
-            let json = serde_json::to_string(&msg)?;
-            ws_sender.send(Message::Text(json)).await?;
-        }
-
+        // Don't send anything proactively - wait for client to initiate
         while let Some(msg) = ws_receiver.next().await {
             // Check timeout
             if self.last_activity.elapsed() > CONNECTION_TIMEOUT {
@@ -293,7 +285,8 @@ impl ConnectionHandler {
             match msg {
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(client_msg) => {
-                        if let Some(response) = self.handle_message(client_msg).await? {
+                        let responses = self.handle_message(client_msg).await?;
+                        for response in responses {
                             let json = serde_json::to_string(&response)?;
                             ws_sender.send(Message::Text(json)).await?;
                         }
@@ -332,71 +325,71 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    async fn handle_message(&mut self, msg: ClientMessage) -> Result<Option<ServerMessage>> {
+    async fn handle_message(&mut self, msg: ClientMessage) -> Result<Vec<ServerMessage>> {
         match msg {
             ClientMessage::Auth { key } => self.handle_auth(key).await,
             ClientMessage::UploadRequest { name, size } => {
                 if !self.authenticated {
-                    return Ok(Some(ServerMessage::Error {
+                    return Ok(vec![ServerMessage::Error {
                         code: ErrorCode::AuthRequired,
                         message: "Authentication required".to_string(),
-                    }));
+                    }]);
                 }
                 self.handle_upload_request(name, size).await
             }
             ClientMessage::DataChunk { data, is_final } => {
                 if !self.authenticated {
-                    return Ok(Some(ServerMessage::Error {
+                    return Ok(vec![ServerMessage::Error {
                         code: ErrorCode::AuthRequired,
                         message: "Authentication required".to_string(),
-                    }));
+                    }]);
                 }
                 self.handle_data_chunk(data, is_final).await
             }
             ClientMessage::ListRequest => {
                 if !self.authenticated {
-                    return Ok(Some(ServerMessage::Error {
+                    return Ok(vec![ServerMessage::Error {
                         code: ErrorCode::AuthRequired,
                         message: "Authentication required".to_string(),
-                    }));
+                    }]);
                 }
                 self.handle_list_request().await
             }
             ClientMessage::GetRequest { name } => {
                 if !self.authenticated {
-                    return Ok(Some(ServerMessage::Error {
+                    return Ok(vec![ServerMessage::Error {
                         code: ErrorCode::AuthRequired,
                         message: "Authentication required".to_string(),
-                    }));
+                    }]);
                 }
                 self.handle_get_request(name).await
             }
-            ClientMessage::Ping => Ok(Some(ServerMessage::Pong)),
+            ClientMessage::Ping => Ok(vec![ServerMessage::Pong]),
         }
     }
 
-    async fn handle_auth(&mut self, key: String) -> Result<Option<ServerMessage>> {
+    async fn handle_auth(&mut self, key: String) -> Result<Vec<ServerMessage>> {
         if let Some(ref expected_key) = self.auth_key {
             if key == *expected_key {
                 self.authenticated = true;
                 debug!("Client {} authenticated successfully", self.peer_addr);
-                Ok(Some(ServerMessage::AuthResult {
+                Ok(vec![ServerMessage::AuthResult {
                     success: true,
                     message: None,
-                }))
+                }])
             } else {
                 warn!("Client {} failed authentication", self.peer_addr);
-                Ok(Some(ServerMessage::AuthResult {
+                Ok(vec![ServerMessage::AuthResult {
                     success: false,
                     message: Some("Invalid authentication key".to_string()),
-                }))
+                }])
             }
         } else {
             self.authenticated = true;
-            Ok(Some(ServerMessage::AuthResult {
+            Ok(vec![ServerMessage::AuthResult {
                 success: true,
                 message: None,
-            }))
+            }])
         }
     }
 
@@ -404,30 +397,30 @@ impl ConnectionHandler {
         &mut self,
         name: String,
         size: u64,
-    ) -> Result<Option<ServerMessage>> {
+    ) -> Result<Vec<ServerMessage>> {
         // Validate request
         if let Err(e) = validate_filename(&name) {
-            return Ok(Some(ServerMessage::UploadRejected { reason: e }));
+            return Ok(vec![ServerMessage::UploadRejected { reason: e }]);
         }
 
         if let Err(e) = validate_file_size(size) {
-            return Ok(Some(ServerMessage::UploadRejected { reason: e }));
+            return Ok(vec![ServerMessage::UploadRejected { reason: e }]);
         }
 
         // Check rate limit
         if !self.rate_limiter.check_upload_rate(self.peer_addr).await {
-            return Ok(Some(ServerMessage::Error {
+            return Ok(vec![ServerMessage::Error {
                 code: ErrorCode::RateLimited,
                 message: "Upload rate limit exceeded".to_string(),
-            }));
+            }]);
         }
 
         // Check for existing upload
         if self.current_upload.is_some() {
-            return Ok(Some(ServerMessage::Error {
+            return Ok(vec![ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: "Upload already in progress".to_string(),
-            }));
+            }]);
         }
 
         // Generate unique filename if needed
@@ -444,6 +437,7 @@ impl ConnectionHandler {
             expected_size: size,
             received_size: 0,
             writer: Some(writer),
+            is_complete: false,
         });
 
         info!(
@@ -451,14 +445,14 @@ impl ConnectionHandler {
             final_name, self.peer_addr, size
         );
 
-        Ok(Some(ServerMessage::UploadAccepted { name: final_name }))
+        Ok(vec![ServerMessage::UploadAccepted { name: final_name }])
     }
 
     async fn handle_data_chunk(
         &mut self,
         data: Vec<u8>,
         is_final: bool,
-    ) -> Result<Option<ServerMessage>> {
+    ) -> Result<Vec<ServerMessage>> {
         if let Some(ref mut upload) = self.current_upload {
             // Validate chunk
             if let Err(e) = validate_chunk_size(&data) {
@@ -468,10 +462,10 @@ impl ConnectionHandler {
                 if let Err(e) = fs::remove_file(&temp_path).await {
                     debug!("Failed to remove temp file: {}", e);
                 }
-                return Ok(Some(ServerMessage::Error {
+                return Ok(vec![ServerMessage::Error {
                     code: ErrorCode::InvalidRequest,
                     message: e,
-                }));
+                }]);
             }
 
             // Write chunk
@@ -480,6 +474,9 @@ impl ConnectionHandler {
                 upload.received_size += data.len() as u64;
             }
 
+            // Always send ChunkReceived first
+            let bytes_received = upload.received_size;
+            
             if is_final {
                 // Close writer
                 if let Some(writer) = upload.writer.take() {
@@ -496,26 +493,34 @@ impl ConnectionHandler {
                     upload.filename, self.peer_addr, upload.received_size
                 );
 
-                let response = ServerMessage::UploadComplete {
-                    total_bytes: upload.received_size,
-                };
-
-                self.current_upload = None;
-                Ok(Some(response))
-            } else {
-                Ok(Some(ServerMessage::ChunkReceived {
-                    bytes_received: upload.received_size,
-                }))
+                // Mark upload as complete but don't clear it yet
+                upload.is_complete = true;
             }
+            
+            // Send ChunkReceived first
+            let mut responses = vec![ServerMessage::ChunkReceived {
+                bytes_received,
+            }];
+            
+            // If upload is complete, also send UploadComplete
+            if upload.is_complete {
+                let total = upload.received_size;
+                self.current_upload = None;
+                responses.push(ServerMessage::UploadComplete {
+                    total_bytes: total,
+                });
+            }
+            
+            Ok(responses)
         } else {
-            Ok(Some(ServerMessage::Error {
+            Ok(vec![ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: "No upload in progress".to_string(),
-            }))
+            }])
         }
     }
 
-    async fn handle_list_request(&mut self) -> Result<Option<ServerMessage>> {
+    async fn handle_list_request(&mut self) -> Result<Vec<ServerMessage>> {
         let mut entries = fs::read_dir(&self.store_path).await?;
         let mut files = Vec::new();
 
@@ -543,25 +548,25 @@ impl ConnectionHandler {
         // Sort by name
         files.sort_by(|a, b| a.name.cmp(&b.name));
 
-        Ok(Some(ServerMessage::FileList { files }))
+        Ok(vec![ServerMessage::FileList { files }])
     }
 
-    async fn handle_get_request(&mut self, name: String) -> Result<Option<ServerMessage>> {
+    async fn handle_get_request(&mut self, name: String) -> Result<Vec<ServerMessage>> {
         if let Err(e) = validate_filename(&name) {
-            return Ok(Some(ServerMessage::Error {
+            return Ok(vec![ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: e,
-            }));
+            }]);
         }
 
         let file_path = self.store_path.join(&name);
 
         // Check if file exists
         if !file_path.exists() {
-            return Ok(Some(ServerMessage::Error {
+            return Ok(vec![ServerMessage::Error {
                 code: ErrorCode::FileNotFound,
                 message: format!("File not found: {}", name),
-            }));
+            }]);
         }
 
         // Get file size
@@ -585,13 +590,13 @@ impl ConnectionHandler {
 
             // This would normally be sent through the WebSocket
             // For now we just return the first chunk as a response
-            return Ok(Some(ServerMessage::DataChunk {
+            return Ok(vec![ServerMessage::DataChunk {
                 data: buffer[..n].to_vec(),
                 is_final,
-            }));
+            }]);
         }
 
-        Ok(None)
+        Ok(vec![])
     }
 
     async fn generate_unique_filename(&self, name: &str) -> Result<String> {
